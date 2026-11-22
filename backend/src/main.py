@@ -11,7 +11,7 @@ from .schemas import *
 from .common import lock,pack,add,audit,stamp
 from .auth import current,writer,supervisor,verify,token
 from .middleware import Trace,Burst
-from . import auction_service as auction,dispute_service as dispute
+from . import auction_service as auction,dispute_service as dispute,pricing
 q=redis.Redis.from_url(os.environ['REDIS_URL'],decode_responses=True)
 @asynccontextmanager
 async def lifespan(app):
@@ -35,7 +35,7 @@ def login(d:Login,s=Depends(session)):
 def me(u=Depends(current)):return {'email':u.email,'role':u.role}
 @app.get('/archive')
 def archive(s=Depends(session),u=Depends(current)):
-    return {m.__tablename__:[pack(x)for x in s.scalars(select(m).order_by(m.id))]for m in (Clock,Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Dispute,Settlement)}
+    return {m.__tablename__:[pack(x)for x in s.scalars(select(m).order_by(m.id))]for m in (Clock,Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Dispute,Settlement,PriceReview)}
 @app.get('/audits')
 def audits(s=Depends(session),u=Depends(current)):return [pack(x)for x in s.scalars(select(Audit).order_by(Audit.id.desc()).limit(50))]
 @app.post('/consignments')
@@ -87,6 +87,15 @@ def bid(id:int,d:BidInput,s=Depends(session),u=Depends(writer)):
 @app.post('/lots/{id}/close')
 def close(id:int,s=Depends(session),u=Depends(supervisor)):
     x=auction.close(s,id,u);s.commit();return x
+@app.get('/lots/{id}/estimate')
+def lot_estimate(id:int,s=Depends(session),u=Depends(current)):
+    lot=s.get(AuctionLot,id)
+    if not lot:raise HTTPException(404,'拍卖标的不存在')
+    ses=s.get(AuctionSession,lot.session_id);best=auction.top_bid(s,lot.id)
+    return pricing.estimate(s,lot,ses,best.unit_cents if best else None)
+@app.post('/reviews/{id}/decide')
+def review_decide(id:int,d:ReviewDecisionInput,s=Depends(session),u=Depends(supervisor)):
+    x=auction.decide_review(s,id,d,u);s.commit();return x
 @app.post('/lots/{id}/cancel')
 def cancel(id:int,s=Depends(session),u=Depends(supervisor)):
     x=auction.cancel(s,id,u);s.commit();return x

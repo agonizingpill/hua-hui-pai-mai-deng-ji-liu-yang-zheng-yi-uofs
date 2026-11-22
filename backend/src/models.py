@@ -26,7 +26,11 @@ class AuctionLot(Base):
     __table_args__=(CheckConstraint('crates>0 AND reserve_cents>0'),)
 class Bid(Base):
     __tablename__='bids'
-    id=Column(Integer,primary_key=True);lot_id=Column(Integer,ForeignKey('auction_lots.id'),nullable=False);buyer=Column(String(80),nullable=False);unit_cents=Column(Integer,nullable=False);at=Column(String(20),nullable=False)
+    id=Column(Integer,primary_key=True);lot_id=Column(Integer,ForeignKey('auction_lots.id'),nullable=False);buyer=Column(String(80),nullable=False);unit_cents=Column(Integer,nullable=False);at=Column(String(20),nullable=False);state=Column(String(20),default='active')
+class PriceReview(Base):
+    __tablename__='price_reviews'
+    id=Column(Integer,primary_key=True);lot_id=Column(Integer,ForeignKey('auction_lots.id'),nullable=False);bid_id=Column(Integer,ForeignKey('bids.id'),nullable=False);reason=Column(String(20),nullable=False);estimate=Column(JSON);state=Column(String(20),default='pending');note=Column(String(250));decided_by=Column(String(100));decided_at=Column(String(20));created_at=Column(String(20),nullable=False)
+    __table_args__=(UniqueConstraint('lot_id','bid_id'),)
 class Deal(Base):
     __tablename__='deals'
     id=Column(Integer,primary_key=True);lot_id=Column(Integer,ForeignKey('auction_lots.id'),unique=True,nullable=False);bid_id=Column(Integer,ForeignKey('bids.id'),nullable=False);buyer=Column(String(80),nullable=False);crates=Column(Integer,nullable=False);unit_cents=Column(Integer,nullable=False);original_grade=Column(String(2),nullable=False);effective_grade=Column(String(2),nullable=False);revision=Column(Integer,default=1);at=Column(String(20),nullable=False)

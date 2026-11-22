@@ -24,5 +24,6 @@ class LotInput(BaseModel):
     code:str=Field(min_length=3,max_length=60);consignment_id:int;sample_id:int;session_id:int;crates:int=Field(ge=1,le=10000);reserve_cents:int=Field(ge=100,le=10000000)
 class BidInput(BaseModel):buyer:str=Field(min_length=2,max_length=80);unit_cents:int=Field(ge=100,le=10000000)
 class DisputeInput(BaseModel):deal_id:int;reason:str=Field(min_length=6,max_length=250)
+class ReviewDecisionInput(BaseModel):action:Literal['approve','revoke'];note:str=Field(min_length=2,max_length=250)
 class DecisionInput(BaseModel):grade:Literal['A','B','C'];note:str=Field(min_length=6,max_length=250)
 class ReceiptInput(BaseModel):receipt:str=Field(min_length=4,max_length=80)

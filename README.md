@@ -28,7 +28,7 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 1. **采切批次与到场分筐**：Consignment唯一code，种植户/品种/采切与到场时间/筐数/每筐支数。到场必须在采切后48小时内且不晚于业务时钟。数量建立后不可任意改写，主管只能修筐贴备注。挂场和成交合计占筐不得超实收。
 2. **瓶插留样与寿命估级**：VaseSample关联到场单，唯一留样签，成熟度、杆长、冷藏小时不得超过采后小时。recorded→queued→running→ready或failed，worker真实估级后主管核定A/B/C，保留模型建议与人工核级。实际瓶插终点只能封存一次；争议使用冻结快照，不覆盖旧证据。
 3. **拍卖场次和底价**：AuctionSession设开场/截止，AuctionLot关联本批已核级留样和场次。A最低80元/筐、B55元、C30元。挂场先锁Consignment父行，再计算所有未撤场标的占筐。未评级、低底价、超余筐或已截止拒绝。未出价未成交标的可主管撤场释放额度，有出价不得撤场。
-4. **竞价与成交锁筐**：Bid须在`opens_at ≤ clock < closes_at`时提交，达到底价并严格高于当前最高价。同父行→场次→业务时钟→标的锁序，避免并发报价检查窗口。主管只能在截止后一次截标，最高价Bid生成唯一Deal；无报价不成交，需撤场。成交冻结买方、单价、筐数与原等级，不能再次出售。
+4. **竞价与成交锁筐**：Bid须在`opens_at ≤ clock < closes_at`时提交，达到底价并严格高于当前最高有效价。同父行→场次→业务时钟→标的锁序，避免并发报价检查窗口。主管只能在截止后一次截标。截标先按`pricing.py`估价：取本场次开场前已成交Deal，按品种/等级/筐数训练GradientBoostingRegressor（不足4笔退化为中位数），同品种同等级可比成交不足2笔或最高报价偏离估价±30%即异常。异常则标的转held留筐、生成PriceReview冻结估价快照，不生成成交单；主管裁决放行才成交，或撤销该口价后用同一份估价核下一口，仍异常继续复核，全部撤完标的回到offered放筐（可撤场释放筐数）。复核单绑定具体Bid并持行锁，并发/重试裁决只有一份生效，旧裁决落不到下一口；Deal对lot唯一，重试不重复成交。无报价不成交，需撤场。成交冻结买方、单价、筐数与原等级，不能再次出售。
 5. **留样争议和复判**：Deal必须已有实际留样天数才可开Dispute，每成交只允许一条未决争议。主管复判不得上调现有效等级，也不得高于冻结终点对应级别（≥10天A、≥7天B、否则C）。复判只追加修订，推进Deal.revision，旧draft结算作废；已付记录保留。
 6. **货款结算及差额补退**：A/B/C权重100/90/75，`折后货款=floor(成交筐价×筐数×新等级权重÷原等级权重)`，佣金floor(货款×5%)，目标净款=货款−佣金。本次delta=当前目标−所有已付delta合计；负数为种植户退款。每成交每revision唯一Settlement，争议未决禁止生成/支付，过期/已付/作废拒绝再支付，回单号持久化。金额用整数分。
 
@@ -38,6 +38,8 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 
 `backend/src/grading.py`固定NumPy seed35生成200条合成花卉观测：成熟度0.1–1、杆长35–90cm、采后1–40h、冷藏0–25h；目标`clip(14−6×成熟度+.04×(杆长−50)−.13×采后小时+.09×冷藏小时+N(0,.35),2,20)`。先固定拆分150训练/50留出，GradientBoostingRegressor（80树、深度2、seed35）仅拟合训练集，输出留出MAE天数、预测瓶插天数与A/B/C建议。保留源数据SHA256、训练/留出索引与输入快照；不是实际客户农业样本，模型不替代验级员判断。
 
+`backend/src/pricing.py`为截标估价：训练集是本场次`opens_at`之前已成交的Deal（联标的等级快照与批次品种），特征为品种/等级one-hot加筐数，GradientBoostingRegressor（60树、深度2、seed35）拟合筐价；历史成交不足4笔时退化为可比成交（无则全部成交）中位数。同品种同等级可比不足2笔即`few_comparables`，最高报价偏离估价±30%即`abnormal_price`，两种都转复核不出成交单。估价快照（模型、训练笔数、可比明细、偏差、阈值）冻结在PriceReview.estimate，撤价后核下一口复用同一份快照；`GET /lots/{id}/estimate`供竞价页实时查询估价依据。合成演示数据不证明真实花价。
+
 接口将留样ID送Redis，worker计算真实sklearn结果，DB prediction与`/artifacts/grade-ID.json`共享卷落盘。故障记录failed/error，Redis恢复后可同记录重试。未实现worker硬崩溃后的running自动回收，不能声称可靠消息投递。
 
 ## 一天的工作剧本
@@ -45,7 +47,7 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 1. 07:30 验级员接`FL031`洋桔梗18筐，每筐40支，采切04:30；核对筐贴FL031-01至18。2筐有历史成交和6天留样争议，剩余16筐可演练。
 2. 08:00 对新批建立`FLS-NEW`，成熟度.3、杆长72cm、冷藏2h，送worker估级；查看150/50留出MAE，主管结合验花核定A。
 3. 08:10 建`MORNING-NEW`场次08:00–09:00，挂`LOT-NEW`4筐、底价8000分。试7000分挂场被拒，改8000恢复；重复挂超过实收也拒。
-4. 08:20 花店甲报价9000分/筐，花店乙10000分；低于底价、同最高价都拒。提前截标拒绝，主管推进业务时钟到09:00后截标，乙成交4筐40000分。
+4. 08:20 花店甲报价9000分/筐，花店乙10000分；低于底价、同最高价都拒。提前截标拒绝，主管推进业务时钟到09:00后截标。截标先按开场前历史成交估价（seed含FL026/27/28与FL031四笔），10000分偏差约4%属正常，乙成交4筐40000分。若最高报价30000分或新品种无可比成交，标的留筐转复核：竞价页可查估价依据（模型、训练笔数、可比成交明细、偏差），主管裁决放行成交或撤价；撤价后同一份估价核下一口，全撤完放筐。
 5. 09:10 生成R1货款：40000−2000佣金=38000分，登记`BANK-FIRST`回单。
 6. 09:20 买方申请争议，无实际留样终点先被拒。回瓶插页封存6天，再开争议；主管据冻结留样复判C，Deal推进R2。
 7. 09:40 R2目标30000货款−1500佣金=28500分；此前已付38000，补退delta为−9500分，登记`REFUND-9500`退款回单。R1保持原值。
@@ -53,7 +55,7 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 
 ## 结构与开发
 
-后端关系实体`models.py`、输入约束`schemas.py`、`auction_service.py`父锁/额度/竞价/成交、`dispute_service.py`证据/修订/金额账、`grading.py`模型、`worker.py`队列、`main.py`逐路由权限。前端六独立pages分别处理arrival/samples/offers/bidding/disputes/settlement，`components/tickets.js`留样等级签/到场签/拍价带等跨页复用；`utils/format.js`类型转义、`utils/actions.js`请求错误恢复、store关联档案。前后端constants均有角色、等级、留样状态、标的状态，后端schema/业务规则执行校验，前端展示实际持久状态。
+后端关系实体`models.py`、输入约束`schemas.py`、`auction_service.py`父锁/额度/竞价/截标复核与裁决、`pricing.py`筐价估价模型、`dispute_service.py`证据/修订/金额账、`grading.py`模型、`worker.py`队列、`main.py`逐路由权限。前端六独立pages分别处理arrival/samples/offers/bidding/disputes/settlement，`components/tickets.js`留样等级签/到场签/拍价带等跨页复用；`utils/format.js`类型转义、`utils/actions.js`请求错误恢复、store关联档案。前后端constants均有角色、等级、留样状态、标的状态与复核状态，后端schema/业务规则执行校验，前端展示实际持久状态。
 
 本地后端安装requirements，配置DATABASE_URL/REDIS_URL/JWT_SECRET，运行`uvicorn src.main:app --reload`与`python -m src.worker`；前端可由Compose Nginx反代/api。seed自然键只补缺：不覆盖人工筐贴、时钟、观察、竞价、争议判定和已付回单。测试与截图在`../../test-artifacts/gb-1035/`。
 
